@@ -524,6 +524,7 @@ If cursor is at heading, then call `outline-cycle' which cycles between
 
 
 ;;; Mode Definitions
+;;;###autoload
 (define-derived-mode satysfi-mode outline-mode
   satysfi-name-string
   "Major mode for editing SATySFi formated text."
