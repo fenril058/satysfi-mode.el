@@ -91,8 +91,7 @@
 (defcustom satysfi-view-command "open"
   "Command used by `stysfi-mode-view' to view PDF."
   :type 'string
-  :group 'satysfi
-  )
+  :group 'satysfi)
 
 (defcustom satysfi-enable-electric-pair-mode t
   "If non-nil enable `electric-pair-mode'."
@@ -151,6 +150,12 @@ default value does not add any extra indent thus providing."
     st)
   "Syntax table used while in SATySFi mode.")
 
+(eval-and-compile
+  (defconst satysfi-mode-syntax-propertize-rules
+   (syntax-propertize-precompile-rules
+    ("${\\(.+?\\)}"
+     (1 "w")))
+   "Syntax-propertize rules for satysfi-mode"))
 
 ;;; Font-Lock support
 (defun satysfi-syntactic-face (state)
@@ -161,7 +166,7 @@ See `font-lock-syntactic-face-function' for details."
      (in-comment font-lock-comment-face)
      (t nil))))
 
-(defvar satysfi-command-list
+(defvar satysfi-reserved-word-list
   '("let" "let-rec" "let-mutable" "let-inline" "let-block" "let-math" "in" "and"
     "match" "with" "when" "as" "if" "then" "else" "fun"
     "type" "constraint" "val" "direct" "of"
@@ -170,9 +175,9 @@ See `font-lock-syntactic-face-function' for details."
     "controls" "cycle")
   "List of the command names.")
 
-(defvar satysfi-command-regexp
-  (regexp-opt satysfi-command-list 'words)
-  "Regular expression which matches any words in `satysfi-command-list'.")
+(defvar satysfi-reserved-word-regexp
+  (regexp-opt satysfi-reserved-word-list 'words)
+  "Regular expression which matches any words in `satysfi-reserved-word-list'.")
 
 (defvar satisfi-inline-command-regexp
   "\\(\\\\\\(?:\\\\\\\\\\)*\\([a-zA-Z0-9\\-]+\\.\\)*[a-zA-Z0-9\\-]+\\)\\>")
@@ -187,7 +192,7 @@ See `font-lock-syntactic-face-function' for details."
   "\\(\\\\\\(?:@\\|`\\|\\*\\| \\|%\\||\\|;\\|{\\|}\\|<\\|>\\|\\$\\|#\\|\\\\\\)\\)")
 
 (defvar satysfi-font-lock-list
-  `((,satysfi-command-regexp  ; 普通の文中のinなどにも色がついてしまう
+  `((,satysfi-reserved-word-regexp
      (0 'font-lock-keyword-face))
     (,satisfi-inline-command-regexp
      (1 'satysfi-inline-command-face t))
@@ -198,7 +203,11 @@ See `font-lock-syntactic-face-function' for details."
     (,satysfi-escaped-character-regexp
      (1 'satysfi-escaped-character-face t))
     )
-  "Default expressions to highlight in SATySFi mode.")
+  "Default expressions to highlight in SATySFi mode.
+
+Any words in `satysfi-reserved-word-list' get highlighted in this
+simple implementation.  Of course, This is NOT the desired behavior.
+To highlight only appropriate keywords is a future task.")
 
 
 ;;; Outline support
@@ -269,6 +278,7 @@ This function was originally derived from
     (modify-syntax-entry ?\) "." st)
     st)
   "Syntax table used while computing indentation.
+
 This variable was originally derived from `tex-latex-indent-syntax-table'.")
 
 (defun satysfi-indent (&optional _arg)
@@ -392,35 +402,20 @@ This was originally derived from `latex-find-indent'."
 		         (skip-syntax-forward " ")
 		         (current-column)))))))))))
 
-;; このあたりはTeX/LaTeX用のままなので要変更
 (defun satysfi-down-list ()
-  "Like (down-list 1) but aware of multi-char elements."
-  (forward-comment (point-max))
-  (let ((forward-sexp-function nil))
-    (if (not (looking-at "\\\\begin\\>"))
-	    (down-list 1)
-      (forward-sexp 1)
-      ;; Skip arguments.
-      (while (looking-at "[ \t]*[[{(]")
-	    (with-syntax-table satysfi-mode-syntax-table
-	      (forward-sexp))))))
+  (down-list 1))
 
 (defun satysfi-syntax-after ()
-  "Like (char-syntax (char-after)) but aware of multi-char elements."
-  (if (looking-at "\\\\end\\>")
-      ?\)
-    (char-syntax (following-char))))
+  (char-syntax (char-after)))
 
 (defun satysfi-skip-close-parens ()
-  "Like (skip-syntax-forward \" )\") but aware of multi-char elements."
-  (let ((forward-sexp-function nil))
-    (while (progn (skip-syntax-forward " )")
-		          (looking-at "\\\\end\\>"))
-      (forward-sexp 2))))
+  (skip-syntax-forward " )"))
 
 (defmacro satysfi-search-noncomment (&rest body)
   "Execute BODY as long as it return non-nil and point is in a comment.
-Return the value returned by the last execution of BODY."
+Return the value returned by the last execution of BODY.
+
+This was originally derived from `tex-search-noncomment'."
   (declare (debug t))
   (let ((res-sym (make-symbol "result")))
     `(let (,res-sym)
@@ -429,48 +424,8 @@ Return the value returned by the last execution of BODY."
 		(save-excursion (skip-chars-backward "^\n%") (not (bolp)))))
        ,res-sym)))
 
-;; (defun satysfi-last-unended-begin ()
-;;   "Leave point at the beginning of the last `\\begin{...}' that is unended."
-;;   (condition-case nil
-;;       (while (and (satysfi-search-noncomment
-;; 		   (re-search-backward "\\\\\\(begin\\|end\\)\\s *{"))
-;; 		  (looking-at "\\\\end"))
-;; 	(satysfi-last-unended-begin))
-;;     (search-failed (error "Couldn't find unended \\begin"))))
-
-;; (defun satysfi-next-unmatched-end ()
-;;   "Leave point at the end of the next `\\end' that is unmatched."
-;;   (while (and (satysfi-search-noncomment
-;; 	       (re-search-forward "\\\\\\(begin\\|end\\)\\s *{[^}]+}"))
-;; 	      (save-excursion (goto-char (match-beginning 0))
-;; 			      (looking-at "\\\\begin")))
-;;     (satysfi-next-unmatched-end)))
-
 (defun satysfi-backward-sexp-1 ()
-  "Like (backward-sexp 1) but aware of multi-char elements and escaped parens."
-  (let ((pos (point))
-	    (forward-sexp-function))
-    (backward-sexp 1)
-    (cond ((looking-at
-	        (if satysfi-handle-escaped-parens
-		        "\\\\\\(begin\\>\\|[[({]\\)"
-	          "\\\\begin\\>"))
-	       (signal 'scan-error
-		           (list "Containing expression ends prematurely"
-			             (point) (prog1 (point) (goto-char pos)))))
-	      ;; ((and satysfi-handle-escaped-parens
-		  ;;       (looking-at "\\\\\\([])}]\\)"))
-	      ;;  (satysfi-last-unended-eparen (match-string 1)))
-	      ;; ((eq (char-after) ?{)
-	      ;;  (let ((newpos (point)))
-	      ;;    (when (ignore-errors (backward-sexp 1) t)
-	      ;;      (if (or (looking-at "\\\\end\\>")
-		  ;;              ;; In case the \\ ends a verbatim section.
-		  ;;              (and (looking-at "end\\>") (eq (char-before) ?\\)))
-		  ;;          (satysfi-last-unended-begin)
-		  ;;        (goto-char newpos)))))
-          )))
-
+  (backward-sexp 1))
 
 ;;; Commands
 (defun satysfi-typeset ()
@@ -535,6 +490,10 @@ If cursor is at heading, then call `outline-cycle' which cycles between
 
   ;; Regexp isearch should accept newline and formfeed as whitespace.
   (setq-local search-whitespace-regexp "[ \t\r\n\f]+")
+
+  ;; Syntax
+  (setq-local syntax-propertize-function
+    (syntax-propertize-rules satysfi-mode-syntax-propertize-rules))
 
   ;; Outline
   (setq-local add-log-current-defun-function #'satysfi-current-defun-name)
