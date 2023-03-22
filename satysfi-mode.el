@@ -219,7 +219,7 @@ To highlight only appropriate keywords is a future task.")
   "Assosiation list which elements is the names of the sections used by SATySFi.")
 
 (defvar satysfi-outline-regexp
-  (concat (regexp-opt (cl-mapcar #'car satysfi-section-alist) t) "{\\(.+?[^\\]\\)}")
+  (concat "^.+?" (regexp-opt (cl-mapcar #'car satysfi-section-alist) t) "{\\(.+?[^\\]\\)}")
   "Regular expression which matches SATySFi sections.")
 
 (defun satysfi-outline-level ()
