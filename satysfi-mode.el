@@ -114,6 +114,11 @@ An alternative value is \" . \", if you use a font with a narrow period."
   :type 'string
   :group 'satysfi)
 
+(defcustom satysfi-indent-basic 2
+  "Default indentation offset for SATySFi."
+  :type 'integer
+  :group 'satysfi)
+
 (defcustom satysfi-noindent-commands '("emph" "footnote")
   "Commands for which `satysfi-indent-basic' should not be used."
   :type '(repeat string)
@@ -267,8 +272,6 @@ This function was originally derived from
 ;;; Indent
 (defvar satysfi-indent-allhanging t)
 (defvar satysfi-indent-arg 4)
-(defvar satysfi-indent-basic 2)
-(defvar satysfi-indent-item satysfi-indent-basic)
 (defvar satysfi-handle-escaped-parens t)
 
 (defvar satysfi-indent-syntax-table
