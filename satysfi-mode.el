@@ -159,7 +159,9 @@ default value does not add any extra indent thus providing."
   (defconst satysfi-mode-syntax-propertize-rules
    (syntax-propertize-precompile-rules
     ("${\\(.+?\\)}"
-     (1 "w")))
+     (1 "w"))
+    ("|>"
+     (0 "_")))
    "Syntax-propertize rules for satysfi-mode"))
 
 ;;; Font-Lock support
