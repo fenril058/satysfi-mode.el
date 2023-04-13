@@ -24,7 +24,7 @@
 ;;
 
 ;;; Code:
-
+(require 'rx)
 (require 'outline)
 (require 'imenu)
 (require 'font-lock)
@@ -36,15 +36,21 @@
   :prefix "satysfi-mode-"
   :group 'text)
 
-(defconst satysfi-mode-version "0.1.0"
+(defconst satysfi-mode-version "0.1.1"
   "SATySFi mode version number.")
 
+
 ;;; Faces
 (defgroup satysfi-faces nil
   "Faces used in SATySFi mode."
   :prefix "satysfi-"
   :group 'satysfi
   :group 'faces)
+
+(defface satysfi-keyword-face
+  '((t (:inherit font-lock-variable-name-face)))
+  "Face used to hilghlight reserved word."
+  :group 'satysfi-faces)
 
 (defface satysfi-inline-command-face
   '((((class color) (background dark)) :foreground "#8888ff")
@@ -56,6 +62,12 @@
   '((((class color) (background dark)) :foreground "#ff8888")
     (t (:inherit font-lock-function-name-face)))
   "Face used to hilight block command."
+  :group 'satysfi-faces)
+
+(defface satysfi-math-command-face
+  '((((class color) (background dark)) :foreground "#8888ff")
+    (t (:inherit font-lock-variable-name-face)))
+  "Face used to hilight math commands."
   :group 'satysfi-faces)
 
 (defface satysfi-var-in-string-face
@@ -114,49 +126,258 @@ An alternative value is \" . \", if you use a font with a narrow period."
   :type 'string
   :group 'satysfi)
 
-(defcustom satysfi-noindent-commands '("emph" "footnote")
-  "Commands for which `satysfi-indent-basic' should not be used."
-  :type '(repeat string)
-  :safe (lambda (x) (not (memq nil (mapcar #'stringp x))))
-  :group 'satysfi)
-
-(defcustom satysfi-indent-within-escaped-parens nil
-  "Non-nil means add extra indent to text within escaped parens.
-When this is non-nil, text within matching pairs of escaped
-parens is indented at the column following the open paren.  The
-default value does not add any extra indent thus providing."
-  :type 'boolean
-  :group 'satysfi)
-
-
+
 ;;; Syntax support
+(defvar satysfi-mode-syntax-table-plist
+  '((?% "<")     ; %   : Comment starters
+    (?\n ">")    ; \n  : Comment enders
+    (?\r ">")    ; \r  : Comment enders
+    (?\f ">")    ; ^L  : Comment enders
+    (?\" ".")    ; "   : Punctuation characters
+    (?\\ "\\")   ; \   : Escape-syntax characters
+    (?\C-@ "w")  ; ^@  : Word constituents
+    (?@ "_")     ; @   : Symbol constituents
+    (?* "_")     ; *   : Symbol constituents
+    (?\t " ")    ; Tab : Whitespace characters
+    (?& ".")     ; &   : Punctuation characters
+    (?_ ".")     ; _   : Symbol constituents
+    (?^ ".")     ; ^   : Punctuation characters
+    (?\# "'")    ; #   : Expression prefixes
+    )
+  )
+
 (defvar satysfi-mode-syntax-table
-  (let ((st (make-syntax-table text-mode-syntax-table)))
-    (modify-syntax-entry ?% "<" st)     ; %
-    (modify-syntax-entry ?< "(>" st)    ; <
-    (modify-syntax-entry ?> ")<" st)    ; >
-    (modify-syntax-entry ?\" "." st)    ; "
-    (modify-syntax-entry ?\\ "\\" st)   ; \
-    (modify-syntax-entry ?\r ">" st)    ; \r
-    (modify-syntax-entry ?\n ">" st)    ; \n
-    (modify-syntax-entry ?\f ">" st)    ; ^L
-    (modify-syntax-entry ?\C-@ "w" st)  ; ^@
-    (modify-syntax-entry ?@ "_" st)     ; @
-    (modify-syntax-entry ?* "_" st)     ; *
-    (modify-syntax-entry ?\t " " st)    ; Tab
-    (modify-syntax-entry ?& "." st)     ; &
-    (modify-syntax-entry ?_ "." st)     ; _
-    (modify-syntax-entry ?^ "." st)     ; ^
-    st)
-  "Syntax table used while in SATySFi mode.")
+  (let ((st (make-syntax-table prog-mode-syntax-table)))
+    (dolist (plist satysfi-mode-syntax-table-plist st)
+      (let ((char (car plist))
+            (syntax (nth 1 plist)))
+        (modify-syntax-entry char syntax st))))
+  "Syntax table used while in `satysfi-mode'.")
 
 (eval-and-compile
-  (defconst satysfi-mode-syntax-propertize-rules
+  (defconst satysfi-syntax-propertize-rules
    (syntax-propertize-precompile-rules
-    ("${\\(.+?\\)}"
-     (1 "w")))
-   "Syntax-propertize rules for satysfi-mode"))
+    ("\\('\\)<"                         ; '<
+     (1 "'"))
+    ("\\(\\$\\){"                       ; ${
+     (1 "'"))
+    ("\\(!\\)[(<[{]"                    ; !( or !< or !{
+     (1 "'"))
+    ;; ("\\(?:\\sw\\|\\s_\\)\\(-+\\)"
+    ;;  (1 "_"))
+    )
+   "Syntax-propertize rules for `satysfi-mode'"))
 
+(defun satysfi-syntax-propertize (beg end)
+  "Syntax propertize the region between BEG and END.
+
+Originally from:
+https://github.com/hanazuki/satysfi.el"
+
+  (remove-list-of-text-properties beg end '(satysfi-lexing-context))
+  (funcall (syntax-propertize-rules satysfi-syntax-propertize-rules) beg end)
+
+  (save-excursion
+    (catch 'exit
+      (goto-char beg)
+      (while (< (point) end)
+        (let ((ppss (syntax-ppss)))
+          (if (eq (nth 3 ppss) t)
+              ;; if this is inside ` string
+              (let ((open-marker
+                     (save-excursion
+                       (goto-char (nth 8 ppss))
+                       (looking-at (rx (? ?#) (group (+ ?`))))
+                       (match-string 1))))
+                (unless (search-forward open-marker end t)
+                  (throw 'exit t))
+                (unless (looking-at-p "#")
+                  (forward-char -1))
+                (put-text-property (point) (1+ (point)) 'syntax-table (string-to-syntax "|"))
+                (forward-char +1))
+            ;; if this is outside ` string
+            (while (and
+                    (< (point) end)
+                    (forward-comment 1)))
+            (unless (and
+                     (< (point) end)
+                     (re-search-forward (rx (any "#`<>([{@")) end t))
+              (throw 'exit t))
+            (goto-char (match-beginning 0))
+
+            (pcase (following-char)
+              ((guard (looking-at-p (rx (? ?#) (+ ?`))))
+               (put-text-property (point) (1+ (point)) 'syntax-table (string-to-syntax "|"))
+               (goto-char (match-end 0)))
+              (?<
+               (let ((ctx (car (satysfi--lexing-context (point)))))
+                 (cond
+                  ((memq ctx '(block inline))
+                   (put-text-property (point) (1+ (point)) 'syntax-table (string-to-syntax "(>"))
+                   (put-text-property (point) (1+ (point)) 'satysfi-lexing-context (satysfi--lexing-context-transition ctx (point))))
+                  ((eq (preceding-char) ?')
+                   (put-text-property (point) (1+ (point)) 'syntax-table (string-to-syntax "(>"))
+                   (put-text-property (point) (1+ (point)) 'satysfi-lexing-context (satysfi--lexing-context-transition ctx (point))))))
+               (forward-char 1))
+              (?>
+               (if (eq (car (satysfi--lexing-context (point))) 'block)
+                   (put-text-property (point) (1+ (point)) 'syntax-table (string-to-syntax ")<")))
+               (forward-char 1))
+              ((or ?\( ?\[ ?\{)
+               (let ((ctx (car (satysfi--lexing-context (point)))))
+                 (put-text-property (point) (1+ (point)) 'satysfi-lexing-context (satysfi--lexing-context-transition ctx (point))))
+               (forward-char 1))
+              (?@
+               (let ((eol (min end (line-end-position))))
+                 (when (re-search-forward (rx ":" (0+ " ")) eol t)
+                   (while (re-search-forward (rx (1+ (not (syntax word)))) eol t)
+                     (put-text-property (match-beginning 0) (match-end 0) 'syntax-table (string-to-syntax "_"))))
+                 (goto-char eol)))
+              (_
+               (forward-char 1)))))))))
+
+(defun satysfi--lexing-context-transition (current-context pos)
+  "Given CURRENT-CONTEXT, compute the next lexing context transition at POS.
+
+It was originally from
+https://github.com/hanazuki/satysfi.el.
+
+From
+https://github.com/gfngfn/SATySFi/blob/master/src/frontend/lexer.mll:
+
+The SATySFi lexer is stateful; the transitions are:
+| to \ from |program|block |inline|active |  math  |
+|-----------|-------|------|------|-------|--------|
+|  program  | (   ) |      |      | (   ) | !(   ) |
+|           | (| |) |      |      | (| |) | !(| |) |
+|           | [   ] |      |      | [   ] | ![   ] |
+|  block    | '<  > | <  > | <  > | <     | !<   > |
+|  inline   | {   } | {  } | {  } | {     | !{   } |
+|  active   |       | +x ; | \x ; |       |        |
+|           |       | #x ; | #x ; |       |        |
+|  math     | ${  } |      | ${ } |       | {    } |
+Note that the active-block and active-inline transitions are one-way."
+
+  (let ((ch (char-after pos)))
+    (pcase current-context
+      ('program
+       (pcase ch
+         (?\( 'program)
+         (?\[ 'program)
+         (?\< 'block)
+         (?\{ (if (eq (char-before pos) ?$) 'math 'inline))))
+      ('block
+          (pcase ch
+            (?\( (if (satysfi--active-p pos) 'program))
+            (?\[ (if (satysfi--active-p pos) 'program))
+            (?\< 'block)
+            (?\{ 'inline)))
+      ('inline
+        (pcase ch
+          (?\( (if (satysfi--active-p pos) 'program))
+          (?\[ (if (satysfi--active-p pos) 'program))
+          (?\< 'block)
+          (?\{ (if (eq (char-before pos) ?$) 'math 'inline))))
+      ('math
+       (if (eq (char-before pos) ?!)
+           (pcase ch
+             (?\( 'program)
+             (?\[ 'program)
+             (?\< 'block)
+             (?\{ 'inline))
+         (pcase ch
+           (?\{ 'math)))))))
+
+(defun satysfi--lexing-context (pos)
+  "Return lexing context at POS and the position of enclosing open parenthesis."
+
+  ; find innermost paren with lexing context transition
+  (let ((ppss (syntax-ppss pos)))
+    (cond
+     ((nth 3 ppss) (cons 'string (nth 8 ppss)))
+     ((nth 4 ppss) (cons 'comment (nth 8 ppss)))
+     (t
+      (catch 'exit
+        (dolist (p (reverse (nth 9 (syntax-ppss pos))))
+          (let ((ctx (get-text-property p 'satysfi-lexing-context)))
+            (when ctx
+              (throw 'exit (cons ctx p)))))
+        (cons 'program 0))))))
+
+(defun satysfi--list-context-p (pos)
+  "Return whether POS is in { | }."
+  (pcase-let ((`(,ctx . ,pos) (satysfi--lexing-context pos)))
+    (if (memq ctx '(inline math))
+        (save-excursion
+          (goto-char (1+ pos))
+          (forward-comment (buffer-size))
+          (eq (following-char) ?|)))))
+
+(defun satysfi--active-p (pos &optional skip-block-inline)
+  "Return active command if POS is an active position.
+Skip preceding block and inline area if SKIP-BLOCK-INLINE."
+
+  (save-excursion
+    (goto-char pos)
+    (catch 'exit
+      (let* ((ppss (syntax-ppss))
+             (bos (nth 1 ppss)))
+        ;; never active at toplevel, which is in program context
+        (unless bos
+          (throw 'exit nil))
+
+        (when skip-block-inline
+          (forward-comment (- (buffer-size)))
+          (while (memq (preceding-char) '(?\> ?\}))
+            ;; backtrack to matching paren (unless the closing paren is escaped)
+            (let ((ppss0 (syntax-ppss (1- (point)))))
+              (if (eq (nth 0 ppss) (nth 0 ppss0))
+                  (throw 'exit nil)
+                (goto-char (nth 1 ppss0))))))
+
+        (while t
+          (forward-comment (- (buffer-size)))
+          (cond
+           ((memq (preceding-char) '(?\) ?\]))
+            ;; backtrack to matching paren (unless the closing paren is escaped)
+            (let ((ppss0 (syntax-ppss (1- (point)))))
+              (if (eq (nth 0 ppss) (nth 0 ppss0))
+                  (throw 'exit nil)
+                (goto-char (nth 1 ppss0)))))
+           ((looking-back (rx (or "?*" "?:")) 2)
+            (forward-char -2))
+           (t
+            ;; Check if the last token is a command
+            (throw 'exit
+                   (and
+                    (looking-back
+                     (rx (any "\\+#") (1+ (or (syntax word) (syntax symbol))))
+                     (- (point) bos))
+                    (match-string 0))))))))))
+
+(defun satysfi--active-command (pos)
+  "Return enclosing command name at POS."
+  (let* ((tmp (satysfi--lexing-context pos))
+         (ctx (car tmp))
+         (pos (cdr tmp)))
+    (if (memq ctx '(block inline))
+        (satysfi--active-p pos t))))
+
+(defun satysfi-current-context ()
+  "Print the lexing context at point (for debugging)."
+  (interactive)
+  (message "%s" (satysfi--lexing-context (point))))
+
+(defun satysfi-current-activation ()
+  "Print active command name at point (for debugging)."
+  (interactive)
+  (message (satysfi--active-p (point))))
+
+(defun satysfi-current-command ()
+  "Print enclosing command name at point (for debugging)."
+  (message (satysfi--active-command (point))))
+
+
 ;;; Font-Lock support
 (defun satysfi-syntactic-face (state)
   "Return font-lock face for characters with given STATE.
@@ -179,7 +400,7 @@ See `font-lock-syntactic-face-function' for details."
   (regexp-opt satysfi-reserved-word-list 'words)
   "Regular expression which matches any words in `satysfi-reserved-word-list'.")
 
-(defvar satisfi-inline-command-regexp
+(defvar satysfi-inline-command-regexp
   "\\(\\\\\\(?:\\\\\\\\\\)*\\([a-zA-Z0-9\\-]+\\.\\)*[a-zA-Z0-9\\-]+\\)\\>")
 
 (defvar satysfi-block-command-regexp
@@ -191,23 +412,40 @@ See `font-lock-syntactic-face-function' for details."
 (defvar satysfi-escaped-character-regexp
   "\\(\\\\\\(?:@\\|`\\|\\*\\| \\|%\\||\\|;\\|{\\|}\\|<\\|>\\|\\$\\|#\\|\\\\\\)\\)")
 
-(defvar satysfi-font-lock-list
-  `((,satysfi-reserved-word-regexp
-     (0 'font-lock-keyword-face))
-    (,satisfi-inline-command-regexp
-     (1 'satysfi-inline-command-face t))
-    (,satysfi-block-command-regexp
-     (1 'satysfi-block-command-face t))
-    (,satysfi-var-in-string-regexp
-     (1 'satysfi-var-in-string-face t))
-    (,satysfi-escaped-character-regexp
-     (1 'satysfi-escaped-character-face t))
-    )
-  "Default expressions to highlight in SATySFi mode.
+(defvar satysfi-header-keywords-regexp
+  (rx bol (0+ (syntax whitespace)) (group "@" (or "import" "require" "stage")) ":"))
 
-Any words in `satysfi-reserved-word-list' get highlighted in this
-simple implementation.  Of course, This is NOT the desired behavior.
-To highlight only appropriate keywords is a future task.")
+(defun satysfi--match-contextual-keywords (contexts keywords-regexp)
+  "Only in CONTEXTS, find next match of KEYWORDS-REGEXP.
+
+Originally from:
+https://github.com/hanazuki/satysfi.el"
+
+  (letrec ((re (symbol-value keywords-regexp))
+           (matcher
+            (lambda (limit)
+              (and
+               (re-search-forward re limit t)
+               (or
+                (memq (save-match-data (car (satysfi--lexing-context (point)))) contexts)
+                (funcall matcher limit))))))
+    matcher))
+
+
+(defvar satysfi-font-lock-keywords
+  `((,(satysfi--match-contextual-keywords '(program) 'satysfi-reserved-word-regexp)
+     1 'satysfi-keyword-face)
+    (,(satysfi--match-contextual-keywords '(program) 'satysfi-header-keywords-regexp)
+     1 'satysfi-keyword-face)
+    (,(satysfi--match-contextual-keywords '(block) 'satysfi-block-command-regexp)
+     1 'satysfi-block-command-face)
+    (,(satysfi--match-contextual-keywords '(inline) 'satysfi-inline-command-regexp)
+     1 'satysfi-inline-command-face)
+    (,(satysfi--match-contextual-keywords '(math) 'satysfi-inline-command-regexp)
+     1 'satysfi-math-command-face)
+    (,(satysfi--match-contextual-keywords '(inline math) 'satysfi-escaped-character-regexp)
+     1 'satysfi-escaped-char-face))
+  "Font-lock keywords for `satysfi-mode'.")
 
 
 ;;; Outline support
@@ -244,7 +482,7 @@ This function was originally derived from
        (1+ (point))                     ; without initial "+"
        (match-end 0)))))
 
-
+
 ;;; Imenu support
 (defun satysfi-imenu-create-index ()
   "Generate an alist for imenu from a SATySFi buffer."
@@ -263,170 +501,205 @@ This function was originally derived from
           (error nil))))
     (nreverse menu)))
 
+
+;;; Indentation
+(defcustom satysfi-basic-offset 2
+  "Amount of basic offset."
+  :type 'integer
+  :group 'satysfi)
 
-;;; Indent
-(defvar satysfi-indent-allhanging t)
-(defvar satysfi-indent-arg 4)
-(defvar satysfi-indent-basic 2)
-(defvar satysfi-indent-item satysfi-indent-basic)
-(defvar satysfi-handle-escaped-parens t)
+(defconst satysfi-default-offsets-alist
+  '((program . +)
+    (block . +)
+    (inline . +)
+    (math . +)
+    (list-separator . -)))
 
-(defvar satysfi-indent-syntax-table
-  (let ((st (make-syntax-table satysfi-mode-syntax-table)))
-    (modify-syntax-entry ?$ "." st)
-    (modify-syntax-entry ?\( "." st)
-    (modify-syntax-entry ?\) "." st)
-    st)
-  "Syntax table used while computing indentation.
+(defcustom satysfi-offsets-alist nil
+  "Indentation offset customization."
+  :type '(alist :key-type symbol
+                :value-type (choice
+                             (const :tag "Package default" nil)
+                             (const :tag "Basic offset" :+)
+                             (const :tag "2 * basic offset" :++)
+                             (const :tag "-1 * basic offset" :-)
+                             (const :tag "-2 * basic offset" :--)
+                             (integer :tag "Relative offset")
+                             (vector :tag "Absolute offset" integer))
+                :options (program
+                          block
+                          inline
+                          math
+                          list-separator))
+  :group 'satysfi)
 
-This variable was originally derived from `tex-latex-indent-syntax-table'.")
+(defvar satysfi-find-command-indent-function-alist
+  '(("+listing" . satysfi-find-itemize-indent)
+    ("\\listing" . satysfi-find-itemize-indent)))
 
-(defun satysfi-indent (&optional _arg)
-  "This function was originally derived from `latex-indent'."
-  (if (and (eq (get-text-property (if (and (eobp) (bolp))
-                                      (max (point-min) (1- (point)))
-                                    (line-beginning-position))
-                                  'face)
-	           'tex-verbatim))
-      'noindent
-    (with-syntax-table satysfi-indent-syntax-table
-      ;; TODO: Rather than ignore $, we should try to be more clever about it.
-      (let ((indent
-	         (save-excursion
-	           (beginning-of-line)
-	           (satysfi-find-indent))))
-	    (if (< indent 0) (setq indent 0))
-	    (if (<= (current-column) (current-indentation))
-	        (indent-line-to indent)
-	      (save-excursion (indent-line-to indent)))))))
+(defun satysfi-get-indentation (symbol &optional current-indentation)
+  "Return indentation for syntax SYMBOL.
+If the surrounding indent is not given as CURRENT-INDENTATION,
+it sets to 0"
 
-(defun satysfi-find-indent (&optional virtual)
-  "Find the proper indentation of text after point.
-VIRTUAL if non-nil indicates that we're only trying to find the
-indentation in order to determine the indentation of something
-else.  There might be text before point.
+  (cl-block indent
+    (+ (or current-indentation 0)
+       (let ((offset
+              (cdr (or (assq symbol satysfi-offsets-alist)
+                       (assq symbol satysfi-default-offsets-alist)
+                       (error "Unknown syntax symbol: %s" symbol)))))
+         (pcase offset
+           ('+ satysfi-basic-offset)
+           ('++ (* 2 satysfi-basic-offset))
+           ('- (- satysfi-basic-offset))
+           ('-- (* -2 satysfi-basic-offset))
+           ((pred integerp) offset)
+           (`[,abs-offset] (cl-return-from indent abs-offset))
+           (_ (error "Illegal offset value in satysfi-offsets-alist for %s: %s" symbol offset)))))))
 
-This was originally derived from `latex-find-indent'."
-  (let ((satysfi-handle-escaped-parens
-         satysfi-indent-within-escaped-parens))
+(defun satysfi-indent ()
+  "Indent current line as SATySFi code."
+  (interactive)
+  (let ((indent (satysfi-find-indent (point))))
+    (when indent
+      (let ((orig-column (current-column))
+            (orig-indent (current-indentation)))
+        (indent-line-to (max 0 indent))
+        (when (< orig-indent orig-column)
+          (move-to-column (+ (current-indentation) (- orig-column orig-indent))))))))
+
+(defun satysfi-find-indent (pos)
+  "Find indentation level for the line at POS."
+
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (pcase (satysfi--lexing-context (point))
+      (`(,'string . ,_) (message "!") nil)  ; TODO: what about indentation in multiline string literals?
+      (`(,'comment . ,_) nil)  ; this should never happen, though
+      (`(,_ . ,paren-pos)
+       (let* ((tmp (satysfi-find-base-indent))
+              (indent (car tmp))
+              (chain (cdr tmp))
+              (command (satysfi--active-command (point)))
+              (indent-fun
+               (or
+                (cdr (assoc command satysfi-find-command-indent-function-alist))
+                (and (satysfi--list-context-p (point))
+                     'satysfi-find-list-indent))))
+         (if (and chain indent-fun)
+             (save-restriction
+               (narrow-to-region (1+ paren-pos) (line-end-position))
+               (funcall indent-fun indent))
+           indent))))))
+
+(defun satysfi-find-base-indent ()
+  "Find indentation level for the line at point."
+
+  (save-excursion
+    (back-to-indentation)
+    (pcase-let ((`(,ctx . ,open-pos) (satysfi--lexing-context (point))))
+      (if (eq open-pos 0)
+          ;; no indent for toplevel
+          (cons
+           (if (fboundp 'prog-first-column) (prog-first-column) 0)
+           nil)
+        (let ((content-alignment
+               (save-excursion
+                 (goto-char open-pos)
+                 (if (looking-at-p (rx "(|"))
+                     (forward-char 2)
+                   (forward-char 1))
+                 ;; check if content exists after open paren
+                 (let ((line (line-number-at-pos)))
+                   (forward-comment 1)
+                   (if (and
+                        (eq (line-number-at-pos) line)
+                        (not (eq (current-column) (line-end-position))))
+                     (current-column))))))
+          (if content-alignment  ; TODO: make vertical alignment configurable?
+              (cons content-alignment t)
+            (let ((open-indentaion
+                   (save-excursion
+                     (goto-char open-pos)
+                     (current-indentation)))
+                  (at-close
+                   (save-excursion
+                     (or
+                      (and (looking-at-p (rx "|)"))
+                           (progn (forward-char 2) t))
+                      (and (eq (syntax-class (syntax-after (point))) 5)  ; 5 for close parenthesis
+                           (get-text-property (nth 1 (syntax-ppss (point))) 'satysfi-lexing-context)
+                           (progn (forward-char 1) t))))))
+              (if at-close
+                  (cons open-indentaion nil)
+                (cons (satysfi-get-indentation ctx open-indentaion) t)))))))))
+
+(defun satysfi-find-list-indent (first-column)
+  "Find indentation level inside { | } context, when aligned to FIRST-COLUMN."
+
+  (let ((current-column
+         (lambda ()
+           (if (= (line-number-at-pos (point)) 1)
+               (+ (1- first-column) (current-column))
+             (current-column)))))
     (save-excursion
-      (skip-chars-forward " \t")
+      (back-to-indentation)
       (or
-       ;; Stick the first line at column 0.
-       (and (= (point-min) (line-beginning-position)) 0)
-       ;; Trust the current indentation, if such info is applicable.
-       (and virtual (save-excursion (skip-chars-backward " \t&") (bolp))
-	        (current-column))
+       (catch 'exit
+         (if (eq (following-char) ?|)
+             (while (not (bobp))
+               (forward-line -1)
+               (back-to-indentation)
+               (when (eq (following-char) ?|)
+                 (throw 'exit (funcall current-column))))
 
-       ;; Put leading close-paren where the matching open paren would be.
-       (let (escaped)
-	     (and (or (eq (satysfi-syntax-after) ?\))
-		          ;; Try to handle escaped close parens but keep
-		          ;; original position if it doesn't work out.
-		          (and satysfi-handle-escaped-parens
-		               (setq escaped (looking-at "\\\\\\([])}]\\)"))))
-	          (ignore-errors
-	            (save-excursion
-		          (when escaped
-		            (goto-char (match-beginning 1)))
-		          (satysfi-skip-close-parens)
-		          (satysfi-backward-sexp-1)
-		          (satysfi-find-indent 'virtual)))))
-       ;; Default (maybe an argument)
-       (let ((pos (point))
-	         (indent 0)
-	         up-list-pos)
-	     ;; Find the previous point which determines our current indentation.
-	     (condition-case err
-	         (progn
-	           (satysfi-backward-sexp-1)
-	           (while (> (current-column) (current-indentation))
-		         (satysfi-backward-sexp-1)))
-	       (scan-error
-	        (setq up-list-pos (nth 2 err))))
-	     (cond
-	      ((= (point-min) pos) 0) ; We're really just indenting the first line.
-	      ((integerp up-list-pos)
-	       ;; Have to indent relative to the open-paren.
-	       (goto-char up-list-pos)
-	       (if (and (not satysfi-indent-allhanging)
-		            (save-excursion
-		              ;; Make sure we're an argument to a macro and
-		              ;; that the macro is at the beginning of a line.
-		              (condition-case nil
-			              (progn
-			                (while (eq (char-syntax (char-after)) ?\()
-			                  (forward-sexp -1))
-			                (and (eq (char-syntax (char-after)) ?/)
-				                 (progn (skip-chars-backward " \t&")
-					                    (bolp))))
-			            (scan-error nil)))
-		            (> pos (progn (satysfi-down-list)
-				                  (forward-comment (point-max))
-				                  (point))))
-	           ;; Align with the first element after the open-paren.
-	           (current-column)
-             ;; We're the first element after a hanging brace.
-	         (goto-char up-list-pos)
-	         (+ (if (if (eq (char-after) ?\{)
-                        (save-excursion
-                          (skip-chars-backward " \t")
-                          (let ((end (point)))
-                            (skip-chars-backward "a-zA-Z")
-                            (and (eq (char-before) ?\\)
-                                 (member (buffer-substring (point) end)
-                                         satysfi-noindent-commands))))
-                      )
-		            0
-                  satysfi-indent-basic)
-		        indent (satysfi-find-indent 'virtual))))
-          ;; We're now at the "beginning" of a line.
-	      ((not (and (not virtual) (eq (char-after) ?\\)))
-	       ;; Nothing particular here: just keep the same indentation.
-	       (+ indent (current-column)))
-	      (t
-	       (let ((col (current-column)))
-	         (if (or (not (eq (char-syntax (or (char-after pos) ?\s)) ?\())
-		             ;; Can't be an arg if there's an empty line in between.
-		             (save-excursion (re-search-forward "^[ \t]*$" pos t)))
-		         ;; If the first char was not an open-paren, there's
-		         ;; a risk that this is really not an argument to the
-		         ;; macro at all.
-		         (+ indent col)
-	           (forward-sexp 1)
-	           (if (< (line-end-position)
-		              (save-excursion (forward-comment (point-max))
-				                      (point)))
-		           ;; we're indenting the first argument.
-		           (min (current-column) (+ satysfi-indent-arg col))
-		         (skip-syntax-forward " ")
-		         (current-column)))))))))))
+           (while (not (bobp))
+             (forward-line -1)
+             (back-to-indentation)
+             (unless (eolp)
+               (skip-chars-forward "|")
+               (skip-syntax-forward "-")
+               (throw 'exit (funcall current-column))))))
+       (satysfi-get-indentation 'list-separator first-column)))))
 
-(defun satysfi-down-list ()
-  (down-list 1))
+(defun satysfi-find-itemize-indent (first-column)
+  "Find indentation level inside \\listing context, when aligned to FIRST-COLUMN."
 
-(defun satysfi-syntax-after ()
-  (char-syntax (char-after)))
+  (let ((current-column
+         (lambda ()
+           (if (= (line-number-at-pos (point)) 1)
+               (+ (1- first-column) (current-column))
+             (current-column)))))
+    (save-excursion
+      (back-to-indentation)
+      (or
+       (catch 'exit
+         (if (looking-at (rx (1+ ?*)))
+             (let ((level (- (match-end 0) (match-beginning 0))))
+               (while (not (bobp))
+                 (forward-line -1)
+                 (back-to-indentation)
+                 (when (looking-at (rx (1+ ?*)))
+                   (let ((l (- (match-end 0) (match-beginning 0))))
+                     (cond
+                      ((= l level)
+                       (throw 'exit (funcall current-column)))
+                      ((< l level)
+                       (goto-char (match-end 0))
+                       (skip-syntax-forward "-")
+                       (throw 'exit (funcall current-column))))))))
 
-(defun satysfi-skip-close-parens ()
-  (skip-syntax-forward " )"))
+           (while (not (bobp))
+             (forward-line -1)
+             (back-to-indentation)
+             (unless (eolp)
+               (skip-chars-forward "*")
+               (skip-syntax-forward "-")
+               (throw 'exit (funcall current-column))))))
+       first-column))))
 
-(defmacro satysfi-search-noncomment (&rest body)
-  "Execute BODY as long as it return non-nil and point is in a comment.
-Return the value returned by the last execution of BODY.
-
-This was originally derived from `tex-search-noncomment'."
-  (declare (debug t))
-  (let ((res-sym (make-symbol "result")))
-    `(let (,res-sym)
-       (while
-	   (and (setq ,res-sym (progn ,@body))
-		(save-excursion (skip-chars-backward "^\n%") (not (bolp)))))
-       ,res-sym)))
-
-(defun satysfi-backward-sexp-1 ()
-  (backward-sexp 1))
-
+
 ;;; Commands
 (defun satysfi-typeset ()
   "Run command to typeset the current document."
@@ -436,7 +709,7 @@ This was originally derived from `tex-search-noncomment'."
           ((file-exists-p "Makefile") "make")
           (t (concat satysfi-typeset-command " " (buffer-file-name))))
          ))
-    (call-interactively 'compile))) ; 要改善
+    (call-interactively 'compile)))
 
 (defun satysfi-view ()
   "Run command to view the generated PDF if it exists."
@@ -466,7 +739,7 @@ If cursor is at heading, then call `outline-cycle' which cycles between
 
 (defalias 'satysfi-outline-cycle-buffer 'outline-cycle-buffer)
 
-
+
 ;;; Keymap
 (defvar satysfi-mode-map
   (let ((map (make-sparse-keymap)))
@@ -492,14 +765,15 @@ If cursor is at heading, then call `outline-cycle' which cycles between
   (setq-local search-whitespace-regexp "[ \t\r\n\f]+")
 
   ;; Syntax
-  (setq-local syntax-propertize-function
-    (syntax-propertize-rules satysfi-mode-syntax-propertize-rules))
+  (setq-local syntax-propertize-function #'satysfi-syntax-propertize)
 
   ;; Outline
-  (setq-local add-log-current-defun-function #'satysfi-current-defun-name)
   (setq-local outline-heading-alist satysfi-section-alist)
   (setq-local outline-regexp satysfi-outline-regexp)
   (setq-local outline-level  #'satysfi-outline-level)
+
+  ;; Which function
+  (setq-local add-log-current-defun-function #'satysfi-current-defun-name)
 
   ;; Imenu
   (setq-local imenu-create-index-function #'satysfi-imenu-create-index)
@@ -514,7 +788,7 @@ If cursor is at heading, then call `outline-cycle' which cycles between
 
   ;; Font-lock.
   (setq-local font-lock-defaults
-              '((satysfi-font-lock-list)
+              '(satysfi-font-lock-keywords
     	        nil nil nil nil
                 (font-lock-multiline . t)
     	        (font-lock-mark-block-function . mark-paragraph)
